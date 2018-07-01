@@ -1,0 +1,114 @@
+node {
+	try {
+        notifyBuild('STARTED')
+            def backendDocker
+
+			stage('Preparation') {
+				  new File('proj').mkdir()
+				  new File('backend').mkdir()
+				  dir('proj') { checkout scm }
+				  dir('backend') { git([url: 'git_repo_url', branch: "master", credentialsId: '985490ca-0799-4b9f-9cb5-1fe1c7116d23']) }
+			}
+			
+		    stage('proj Build') {
+			  dir('proj/proj') {
+				// Run the maven build
+				sh "chmod +x app/angular/projClient/node_modules/.bin/ng"
+				if (isUnix()) {
+					sh "mvn -P stage clean install"
+				}
+			  }
+			 sh "cp proj/tools/warmodify.sh proj/proj/app/target ; cd proj/proj/app/target ; sh warmodify.sh"
+		   }
+		   
+		    stage('backend Build') {
+			  dir('backend') {
+				sh "cd backend/src; make clean ; make all"
+				sh "tar -xvzf venv.tar.gz"
+				}
+		   }
+			stage('Clean Images'){
+              	sh "count=` docker ps -a | grep projdocker | grep -v CONTAINER | wc -l`; if ((\$count > 0)); then echo 'container exists' ; docker stop ` docker ps -a | grep projdocker | grep -v CONTAINER | awk '{print \$1}'`; docker rm ` docker ps -a | grep projdocker | grep -v CONTAINER | awk '{print \$1}'`;else echo 'Container Doesnot exists';fi "
+				sh "count=` docker images | grep projdocker | wc -l`; if ((\$count > 0)); then echo 'image exists' ; docker rmi projdocker;else echo 'Image Doesnot exists';fi"
+			}
+			stage('Build image') {
+				dir ('proj') { 
+                  		sh "cp -R ../backend/venv . ; cp -R ../backend/src . ; cp ../backend/backend/build/release/final/ntap_sizer.tar ."
+				        backendDocker = docker.build("projdocker")
+                    }
+			}
+			/*
+			stage('Test image') {
+				app.withRun('-p 9297:9297') {c ->
+        		    
+        		}
+			}
+
+			stage('Push image') {
+				docker.withRegistry('', 'ecr:ap-southeast-1:ecr-repository-credentials') {
+					app.push("latest")
+				}
+			}*/
+			
+			stage('Deploy') {
+				notifyBuild('Deploy Stage Started')
+				sh 'docker run -d --add-host host:`hostname -i` -p 8090:8080 projdocker'
+				notifyBuild('Deploy Stage Completed Successfully !!')
+			}
+			
+			stage('Remove old images') {
+				// remove docker pld images
+				//sh("docker rmi -f 201991143742.dkr.ecr.ap-southeast-1.amazonaws.com/${application}_${environment}:latest ")
+		   }
+          
+            stage ('Archive Artifacts'){
+				archiveArtifacts artifacts: 'proj/proj/app/target/*.war'
+		   }
+		   
+		   stage('Notifications') {
+		   		echo 'Notification sent to build owners with deployment status !!'
+		   }
+		} catch (e) {
+			currentBuild.result = "FAILED"
+			throw e
+		} finally {
+			notifyBuild(currentBuild.result)
+      		//step([$class: 'WsCleanup']);
+		}
+	}
+	
+	def notifyBuild(String buildStatus = 'STARTED') {
+	  // build status of null means successful
+	  buildStatus =  buildStatus ?: 'SUCCESSFUL'
+
+	  // Default values
+	  def colorName = 'RED'
+	  def colorCode = '#FF0000'
+	  def subject = "${buildStatus}: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'"
+	  def summary = "${subject} (${env.BUILD_URL})"
+	  def details = """<p>${buildStatus}: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>
+		<p>Check console output at &QUOT;<a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>"""
+
+	  if (buildStatus == 'STARTED') {
+		color = 'YELLOW'
+		colorCode = '#FFFF00'
+	  } else if (buildStatus == 'SUCCESSFUL') {
+		color = 'GREEN'
+		colorCode = '#00FF00'
+	  } else {
+		color = 'RED'
+		colorCode = '#FF0000'
+	  }
+
+	  // Send notifications
+	  //slackSend (color: colorCode, message: summary)
+
+	  emailext(
+		to: '',
+	//	attachmentsPattern: 'target/surefire-reports/TEST-test.OtherTest.xml',
+		mimeType: 'text/html',
+		attachLog: true,
+		subject: subject,
+		body: details,
+		recipientProviders: [[$class: 'CulpritsRecipientProvider'], [$class: 'RequesterRecipientProvider']]
+		)
